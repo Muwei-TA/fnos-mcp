@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# 会话与敏感数据（trim-cli 文件后端 session）
+.sessions/
+*.session.json
+
+# IDE / 系统
+.idea/
+.vscode/
+.DS_Store
