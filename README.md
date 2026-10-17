@@ -4,16 +4,16 @@
 
 ## 功能覆盖
 
-83 个 MCP 工具，覆盖 trim-cli 的完整能力面：
+89 个 MCP 工具，覆盖 trim-cli 的完整能力面：
 
 | 模块 | 工具示例 |
 | --- | --- |
 | 认证 | `login`（OAuth 2.0 + PKCE）、`submit_auth_code`、`logout`、`whoami` |
 | 系统 | `system_info`、`system_hardware`、`system_volumes`、`system_power_plan` |
-| 文件 | `file_list`、`file_search`、`file_copy`、`file_delete`、`file_trash_*` |
+| 文件 | `file_list`、`file_search`、`file_copy`、`file_delete`、`file_upload`、`file_write_text`、`file_trash_*` |
 | 相册 | `photos_search`（AI 语义搜图）、`photos_detail`、`photos_preview_url` |
 | 应用中心 | `app_list`、`app_store_search`、`app_install`、`app_uninstall` |
-| Docker | `docker_containers`、`docker_images`、`docker_image_pull`、`docker_stats` |
+| Docker | `docker_containers`、`docker_images`、`docker_image_pull`、`docker_container_create`、`docker_compose_ls`、`docker_compose_create`、`docker_request` |
 | 下载 | `download_list`、`download_add_uri`、`download_action` |
 | 日志 | `logger_list`、`logger_modules`、`logger_export` |
 | 监控 | `monitor_cpu`、`monitor_memory`、`monitor_network`、`monitor_disk`、`monitor_gpu` |
@@ -85,7 +85,7 @@ vendor/trim-cli/trim-cli-linux-x64 --profile default --host <host> --port 443 --
 fnos-mcp/
 ├── fnos_mcp/
 │   ├── cli.py       # trim-cli 二进制引导与执行层
-│   └── server.py    # FastMCP 服务器与 83 个工具定义
+│   └── server.py    # FastMCP 服务器与 89 个工具定义
 ├── vendor/trim-cli/ # 六平台 trim-cli 二进制（来自 fnos-skill fa21571）
 ├── pyproject.toml
 └── README.md

@@ -494,6 +494,105 @@ def file_trash_clear(
     return _fmt(run_trim(args + _bool_flag(True), profile=profile, host=host, port=port, scheme=scheme))
 
 
+@mcp.tool
+def file_check_upload(
+    path: Path,
+    size: Annotated[int, "文件大小（字节）"],
+    overwrite: Literal["skip", "replace", "rename"] = "replace",
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """预检上传目标（写操作：探测远端占用与配额）。
+
+    返回远端同名文件状态与空间配额信息，用于在真正上传前确认
+    overwrite 策略。size 为计划上传的本地文件大小（字节）。
+    """
+    return _fmt(run_trim(
+        ["file", "check-upload", path, str(size), "--overwrite", overwrite] + _bool_flag(True),
+        profile=profile, host=host, port=port, scheme=scheme,
+    ))
+
+
+@mcp.tool
+def file_upload(
+    local_file: Annotated[str, "本地文件路径（服务器所在机器）"],
+    remote_dir: Annotated[str, "NAS 目标目录，如 /vol1/1000/文档"],
+    overwrite: Literal["skip", "replace", "rename"] = "replace",
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """上传本地文件到 NAS 目录（写操作）。
+
+    overwrite 决定远端同名文件冲突策略：skip 跳过、replace 覆盖、
+    rename 保留旧文件并给新文件改名。上传前可先用 file_check_upload
+    预检目标状态。
+    """
+    return _fmt(run_trim(
+        ["file", "upload", remote_dir, local_file, "--overwrite", overwrite] + _bool_flag(True),
+        profile=profile, host=host, port=port, scheme=scheme,
+        timeout=600,
+    ))
+
+
+@mcp.tool
+def file_write_text(
+    path: Annotated[str, "NAS 目标文件路径，如 /vol1/1000/文档/note.md"],
+    content: Annotated[str, "写入的文本内容"],
+    overwrite: Literal["skip", "replace", "rename"] = "replace",
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """把文本内容直接写入 NAS 文件（写操作；组合 upload 实现）。
+
+    等价于在服务器临时文件上执行 file upload：远端父目录不存在时会
+    先用 file_mkdir 逐级创建。overwrite=skip 时远端同名文件已存在则
+    跳过不写。适合写配置、脚本、compose 文件等小文本。
+    """
+    import os
+    import tempfile
+
+    if "/" not in path:
+        return "路径无效：必须是 /vol{v}/... 形式的完整文件路径"
+    dirpart, name = path.rsplit("/", 1)
+    if not dirpart or not name:
+        return "路径无效：必须是 /vol{v}/... 形式的完整文件路径"
+
+    fd, tmp = tempfile.mkstemp(prefix="fnos-mcp-write-", suffix=".txt")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        # 父目录缺失时逐级创建（file mkdir 支持递归建目录）
+        parent_check = run_trim(
+            ["file", "prop", dirpart], profile=profile, host=host, port=port, scheme=scheme,
+        )
+        if not parent_check["ok"]:
+            mkdir_result = run_trim(
+                ["file", "mkdir", dirpart] + _bool_flag(True),
+                profile=profile, host=host, port=port, scheme=scheme,
+            )
+            if not mkdir_result["ok"]:
+                return _fmt(mkdir_result)
+        result = run_trim(
+            ["file", "upload", dirpart, tmp, "--overwrite", overwrite] + _bool_flag(True),
+            profile=profile, host=host, port=port, scheme=scheme,
+            timeout=600,
+        )
+        if result["ok"]:
+            return _fmt(result) + f"\n已写入 {path}（{len(content.encode('utf-8'))} 字节）"
+        return _fmt(result)
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # 相册 Photos
 # ---------------------------------------------------------------------------
@@ -831,6 +930,96 @@ def docker_compose_ls(
 ) -> str:
     """列出 Docker Compose 项目。"""
     return _fmt(run_trim(["docker", "compose", "ls"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def docker_request(
+    endpoint: Annotated[str, "appcgi.dockermgr.* 端点名，如 composeContainers"],
+    body: Annotated[dict | None, "JSON 请求体（object，不含 req/reqid）"] = None,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """调用任意 appcgi.dockermgr.* 端点（写操作，兜底入口）。
+
+    固定命令未覆盖的 Docker 端点走这里：networkList、composeContainers、
+    composeStart/Stop 等。endpoint 只需端点名（CLI 自动加前缀校验），
+    body 为 JSON object 且不能包含 req/reqid（CLI 自动生成）。
+    Compose/网络/系统类写操作前先做只读探测（如 composeList）。
+    """
+    endpoint = endpoint.removeprefix("appcgi.dockermgr.")
+    args = ["docker", "request", f"appcgi.dockermgr.{endpoint}"]
+    if body is not None:
+        args += ["--json", json.dumps(body, ensure_ascii=False)]
+    args.append("--yes")
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def docker_compose_create(
+    body: Annotated[dict, "composeCreate 请求体（object，不含 req/reqid；上游 schema 未完全标准化，透传 fnOS API）"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """创建 Docker Compose 项目（写操作；上游 composeCreate 透传封装）。
+
+    固定子命令只有 compose ls，创建/启停走泛化端点
+    appcgi.dockermgr.composeCreate。body 为 fnOS API 的 JSON object，
+    不能包含 req/reqid。上游 schema 未完全文档化，字段以真机响应为准；
+    典型流程：先 docker_compose_ls 探测现有项目，创建后用
+    docker_request(composeContainers) 验证。
+    """
+    args = ["docker", "request", "appcgi.dockermgr.composeCreate",
+            "--json", json.dumps(body, ensure_ascii=False), "--yes"]
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def docker_container_create(
+    image: Annotated[str, "镜像引用，如 nginx:latest"],
+    name: Annotated[str | None, "容器名"] = None,
+    start: Annotated[bool, "创建后立即启动"] = False,
+    restart: Annotated[bool, "设置 restart 策略"] = False,
+    memory_mb: Annotated[int | None, "内存上限（MB）"] = None,
+    cpu_shares: Annotated[int | None, "CPU 权重（shares）"] = None,
+    env: Annotated[list[str] | None, "环境变量，如 TZ=Asia/Shanghai"] = None,
+    cmd: Annotated[list[str] | None, "容器命令参数"] = None,
+    port_mappings: Annotated[list[str] | None, "端口映射，如 8080:80"] = None,
+    mount_mappings: Annotated[list[str] | None, "挂载映射，如 /vol1/1000/app:/data"] = None,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """创建 Docker 容器（写操作）。
+
+    支持端口/挂载映射、环境变量、内存/CPU 限制与启动策略。
+    创建后可用 docker_containers(--all) 与 docker_container_action 管理。
+    """
+    args = ["docker", "container", "create", "--image", image]
+    if name:
+        args += ["--name", name]
+    if start:
+        args.append("--start")
+    if restart:
+        args.append("--restart")
+    if memory_mb is not None:
+        args += ["--memory", str(memory_mb)]
+    if cpu_shares is not None:
+        args += ["--cpu", str(cpu_shares)]
+    for e in env or []:
+        args += ["--env", e]
+    for c in cmd or []:
+        args += ["--cmd", c]
+    for p in port_mappings or []:
+        args += ["--port", p]
+    for m in mount_mappings or []:
+        args += ["--mount", m]
+    args.append("--yes")
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
 
 
 # ---------------------------------------------------------------------------
