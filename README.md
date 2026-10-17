@@ -80,6 +80,24 @@ vendor/trim-cli/trim-cli-linux-x64 --profile default --host <host> --port 443 --
 - ⚠️ 预检在目标不存在时会留下 0 字节的 `<名字>.~#0` 占位文件。**不要用 `file_delete` 删它**：fnOS 的 rm 把 `X.~#0` 当作 X 的别名，会把同名目标文件一起删掉。占位文件会被后续 `file_upload` 覆盖，留着无害
 - 创建 compose 项目：先把 yaml 写进项目目录，再 `docker_compose_create`，最后 `docker_compose_build` 才真正 `compose up -d`。`docker_compose_start` 只执行 `docker compose start`，新项目还没容器时必然失败。项目目录不能嵌套在自带 compose 文件的目录下（如 `/vol1/1000/docker` 自身有 `docker-compose.yml`），否则 errno `0x03200107`
 
+## 已知问题（219 工具全量实测，fnOS 1.2.0800）
+
+已在 0.4.2 修掉的 MCP 封装层 bug：
+
+- `raw_request` 之前拼成 `raw <method> <request>`，而 CLI 只有 `raw <REQ>`，导致**任何调用都报 unexpected argument**；现在改为 `raw <REQ> [--json] --yes`
+- `network_ssh_status` 之前调 `network ssh switch` 不带参数（CLI 要求必须给 `--enable`/`--disable`），**永远失败**；现在走原始端点 `appcgi.network.ssh.status`
+- `file_usage` 的 `<VOL>` 只接受整数，之前文档写"1 或 /vol1"，传 `vol1` 直接 `invalid digit`；现在统一抽取数字部分
+- 失败结果之前以 `isError=false` + "命令失败（exit N）" 文本返回，客户端无法判断成败；现在抛 `ToolError`，正确置 `isError=true`
+
+仍然存在（上游 trim-cli / fnOS API 限制，非本仓库能修）：
+
+- `file_delete` 是**硬删除**：文件不进 `.@#local/trash`，`file_trash_list` 查不到，`file_trash_restore` 返回 Restored 但文件不回来
+- `file_search`、`file_usage` 调用时上游返回 `failed to call HTTP proxy .../ogh/ac/...`，功能不可用
+- `app_*` 系列必须传 `app_list` 里的 `appName`（如 `fn-codeserver`），传 `name`（如 `code-server`）报 installed app not found
+- `docker_container_create` 的 `cmd` 会被 trim-cli 按空格重新切分，`["sh","-c","sleep 300"]` 变成 `["sh","-c","sleep","300"]`；带空格的命令请走 `docker_request(containerCreate)`
+- `docker_container_stats` 只认 64 位容器 ID，传容器名会静默返回 `{"result":"succ"}` 空壳
+- `monitor_battery`（无电池）、`baidu_*`（网盘应用未运行，502）、`system_details` 部分子项（非官方硬件）会报错，属环境限制
+
 ## 安全设计
 
 - 写操作命令一律显式传 `--yes`，避免 CLI 交互确认卡死 MCP 进程

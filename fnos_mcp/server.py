@@ -16,6 +16,7 @@ import json
 from typing import Annotated, Any, Literal
 
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 
 if __package__ in (None, ""):
     # 支持直接运行：python server.py（把项目根目录加入 sys.path）
@@ -50,7 +51,11 @@ Path = Annotated[str, "NAS 上的路径，如 /vol1/1000/文档"]
 
 
 def _fmt(result: dict) -> str:
-    """把 run_trim 结果转成给 LLM 的文本：优先 JSON，失败时给错误说明。"""
+    """把 run_trim 结果转成给 LLM 的文本：优先 JSON，失败时抛 ToolError。
+
+    失败时抛 ToolError 而不是返回字符串，这样 MCP 客户端能通过
+    isError=true 判定失败（早期版本把错误当成功文本返回，客户端无法区分）。
+    """
     if result["ok"]:
         out = result["stdout"]
         if not out:
@@ -67,7 +72,7 @@ def _fmt(result: dict) -> str:
         parts.append(result["stderr"])
     if result["stdout"]:
         parts.append(f"stdout: {result['stdout']}")
-    return "\n".join(parts)
+    raise ToolError("\n".join(parts))
 
 
 def _bool_flag(value: bool) -> list[str]:
@@ -451,14 +456,21 @@ def file_download_url(
 
 @mcp.tool
 def file_usage(
-    vol: Annotated[str, "卷名或卷 ID，如 1 或 /vol1"],
+    vol: Annotated[str, "卷 ID：1 / \"1\" / vol1 / /vol1 均可，统一取数字部分"],
     profile: Profile = None,
     host: Host = None,
     port: Port = None,
     scheme: Scheme = None,
 ) -> str:
-    """查看卷空间使用分类汇总。"""
-    return _fmt(run_trim(["file", "usage", vol], profile=profile, host=host, port=port, scheme=scheme))
+    """查看卷空间使用分类汇总。
+
+    trim-cli 的 <VOL> 位置参数只接受整数（1 表示 /vol1），传 vol1 会报
+    "invalid digit found in string"，所以这里先把数字部分抽出来再传。
+    """
+    digits = "".join(ch for ch in str(vol) if ch.isdigit())
+    if not digits:
+        return f"卷参数无效：{vol!r}，应传卷 ID（如 1、vol1、/vol1）"
+    return _fmt(run_trim(["file", "usage", digits], profile=profile, host=host, port=port, scheme=scheme))
 
 
 @mcp.tool
@@ -480,7 +492,12 @@ def file_trash_list(
     port: Port = None,
     scheme: Scheme = None,
 ) -> str:
-    """列出回收站内容。"""
+    """列出回收站内容。
+
+    ⚠️ 实测在 fnOS 1.2.0800 上，file rm 是硬删除，回收站接口只回
+    {"result":"succ","uver":...} 而不含任何条目，带不带 path 都一样。
+    不要把本工具的输出当作"删除是否可恢复"的依据。
+    """
     args = ["file", "trash", "list"]
     if path:
         args.append(path)
@@ -888,7 +905,12 @@ def file_delete(
     port: Port = None,
     scheme: Scheme = None,
 ) -> str:
-    """删除文件/目录（进入回收站，写操作）。"""
+    """删除文件/目录（写操作，⚠️ 永久删除）。
+
+    实测：trim-cli 的 file rm 是**硬删除**，文件不会出现在
+    /vol1/<uid>/.@#local/trash 里，file_trash_list 也查不到，
+    file_trash_restore 更是无效。调用前请自行确认。
+    """
     return _fmt(run_trim(["file", "rm", path] + _bool_flag(True), profile=profile, host=host, port=port, scheme=scheme))
 
 
@@ -900,7 +922,12 @@ def file_trash_restore(
     port: Port = None,
     scheme: Scheme = None,
 ) -> str:
-    """从回收站恢复文件（写操作）。"""
+    """从回收站恢复文件（写操作）。
+
+    ⚠️ 实测不可靠：即使返回 "Restored <path>"，文件也常常没有回到原位
+    （因为 file rm 走的是硬删除，回收站里本来就没有该条目）。恢复后请
+    用 file_property 确认。
+    """
     return _fmt(run_trim(["file", "trash", "restore", path] + _bool_flag(True), profile=profile, host=host, port=port, scheme=scheme))
 
 
@@ -1188,13 +1215,18 @@ def app_list(
     port: Port = None,
     scheme: Scheme = None,
 ) -> str:
-    """列出已安装的应用。"""
+    """列出已安装的应用。
+
+    返回的每个应用同时有 appName（API 标识，如 fn-codeserver）和
+    name（显示名，如 code-server）。后续所有 app_* 工具要传的是
+    **appName**，传 name 会报 "installed app not found"。
+    """
     return _fmt(run_trim(["app", "list"], profile=profile, host=host, port=port, scheme=scheme))
 
 
 @mcp.tool
 def app_status(
-    app_name: Annotated[str, "应用名"],
+    app_name: Annotated[str, "应用 appName，取自 app_list 的 appName 字段（如 fn-codeserver），不是 name 显示名"],
     profile: Profile = None,
     host: Host = None,
     port: Port = None,
@@ -1218,7 +1250,7 @@ def app_store_search(
 
 @mcp.tool
 def app_store_detail(
-    app_name: Annotated[str, "应用名"],
+    app_name: Annotated[str, "应用 appName，取自 app_list 的 appName 字段（如 fn-codeserver），不是 name 显示名"],
     profile: Profile = None,
     host: Host = None,
     port: Port = None,
@@ -1241,7 +1273,7 @@ def app_check_update(
 
 @mcp.tool
 def app_install(
-    app_name: Annotated[str, "应用名"],
+    app_name: Annotated[str, "应用 appName，取自 app_list 的 appName 字段（如 fn-codeserver），不是 name 显示名"],
     version: Annotated[str, "要安装的版本"],
     source_id: Annotated[str | None, "来源 ID"] = None,
     volume_id: Annotated[str | None, "安装目标卷 ID"] = None,
@@ -1274,7 +1306,7 @@ def app_install(
 
 @mcp.tool
 def app_uninstall(
-    app_name: Annotated[str, "应用名"],
+    app_name: Annotated[str, "应用 appName，取自 app_list 的 appName 字段（如 fn-codeserver），不是 name 显示名"],
     profile: Profile = None,
     host: Host = None,
     port: Port = None,
@@ -1286,7 +1318,7 @@ def app_uninstall(
 
 @mcp.tool
 def app_start(
-    app_name: Annotated[str, "应用名"],
+    app_name: Annotated[str, "应用 appName，取自 app_list 的 appName 字段（如 fn-codeserver），不是 name 显示名"],
     profile: Profile = None,
     host: Host = None,
     port: Port = None,
@@ -1298,7 +1330,7 @@ def app_start(
 
 @mcp.tool
 def app_stop(
-    app_name: Annotated[str, "应用名"],
+    app_name: Annotated[str, "应用 appName，取自 app_list 的 appName 字段（如 fn-codeserver），不是 name 显示名"],
     profile: Profile = None,
     host: Host = None,
     port: Port = None,
@@ -1310,7 +1342,7 @@ def app_stop(
 
 @mcp.tool
 def app_restart(
-    app_name: Annotated[str, "应用名"],
+    app_name: Annotated[str, "应用 appName，取自 app_list 的 appName 字段（如 fn-codeserver），不是 name 显示名"],
     profile: Profile = None,
     host: Host = None,
     port: Port = None,
@@ -1322,7 +1354,7 @@ def app_restart(
 
 @mcp.tool
 def app_update(
-    app_name: Annotated[str, "应用名"],
+    app_name: Annotated[str, "应用 appName，取自 app_list 的 appName 字段（如 fn-codeserver），不是 name 显示名"],
     version: Annotated[str, "目标版本"],
     volume_id: Annotated[str | None, "安装目标卷 ID"] = None,
     data_volume_id: Annotated[str | None, "数据卷 ID"] = None,
@@ -1487,7 +1519,7 @@ def app_config_list(
 
 @mcp.tool
 def app_config_detail(
-    app_name: Annotated[str, "应用名"],
+    app_name: Annotated[str, "应用 appName，取自 app_list 的 appName 字段（如 fn-codeserver），不是 name 显示名"],
     profile: Profile = None,
     host: Host = None,
     port: Port = None,
@@ -1510,7 +1542,7 @@ def app_config_sys(
 
 @mcp.tool
 def app_config_auth_paths(
-    app_name: Annotated[str, "应用名"],
+    app_name: Annotated[str, "应用 appName，取自 app_list 的 appName 字段（如 fn-codeserver），不是 name 显示名"],
     profile: Profile = None,
     host: Host = None,
     port: Port = None,
@@ -1522,7 +1554,7 @@ def app_config_auth_paths(
 
 @mcp.tool
 def app_config_wizard(
-    app_name: Annotated[str, "应用名"],
+    app_name: Annotated[str, "应用 appName，取自 app_list 的 appName 字段（如 fn-codeserver），不是 name 显示名"],
     profile: Profile = None,
     host: Host = None,
     port: Port = None,
@@ -1534,7 +1566,7 @@ def app_config_wizard(
 
 @mcp.tool
 def app_config_set(
-    app_name: Annotated[str, "应用名"],
+    app_name: Annotated[str, "应用 appName，取自 app_list 的 appName 字段（如 fn-codeserver），不是 name 显示名"],
     fields: Annotated[dict, "要写入的配置字段（JSON object）"],
     profile: Profile = None,
     host: Host = None,
@@ -1567,7 +1599,7 @@ def app_config_set_sys(
 
 @mcp.tool
 def app_config_auto_update(
-    app_name: Annotated[str, "应用名"],
+    app_name: Annotated[str, "应用 appName，取自 app_list 的 appName 字段（如 fn-codeserver），不是 name 显示名"],
     enable: bool,
     profile: Profile = None,
     host: Host = None,
@@ -1584,7 +1616,7 @@ def app_config_auto_update(
 
 @mcp.tool
 def app_config_proxy_access(
-    app_name: Annotated[str, "应用名"],
+    app_name: Annotated[str, "应用 appName，取自 app_list 的 appName 字段（如 fn-codeserver），不是 name 显示名"],
     allow: bool,
     profile: Profile = None,
     host: Host = None,
@@ -1601,7 +1633,7 @@ def app_config_proxy_access(
 
 @mcp.tool
 def app_openapi_app_detail(
-    app_name: Annotated[str, "应用名"],
+    app_name: Annotated[str, "应用 appName，取自 app_list 的 appName 字段（如 fn-codeserver），不是 name 显示名"],
     profile: Profile = None,
     host: Host = None,
     port: Port = None,
@@ -1613,7 +1645,7 @@ def app_openapi_app_detail(
 
 @mcp.tool
 def app_openapi_allow_auth_paths(
-    app_name: Annotated[str, "应用名"],
+    app_name: Annotated[str, "应用 appName，取自 app_list 的 appName 字段（如 fn-codeserver），不是 name 显示名"],
     profile: Profile = None,
     host: Host = None,
     port: Port = None,
@@ -1625,7 +1657,7 @@ def app_openapi_allow_auth_paths(
 
 @mcp.tool
 def app_openapi_add_auth_path(
-    app_name: Annotated[str, "应用名"],
+    app_name: Annotated[str, "应用 appName，取自 app_list 的 appName 字段（如 fn-codeserver），不是 name 显示名"],
     path: Annotated[str, "鉴权路径"],
     profile: Profile = None,
     host: Host = None,
@@ -1638,7 +1670,7 @@ def app_openapi_add_auth_path(
 
 @mcp.tool
 def app_openapi_add_auth_inherit_file(
-    app_name: Annotated[str, "应用名"],
+    app_name: Annotated[str, "应用 appName，取自 app_list 的 appName 字段（如 fn-codeserver），不是 name 显示名"],
     path: Annotated[str, "鉴权继承文件路径"],
     profile: Profile = None,
     host: Host = None,
@@ -2048,7 +2080,7 @@ def docker_container_create(
     memory_mb: Annotated[int | None, "内存上限（MB）"] = None,
     cpu_shares: Annotated[int | None, "CPU 权重（shares）"] = None,
     env: Annotated[list[str] | None, "环境变量，如 TZ=Asia/Shanghai"] = None,
-    cmd: Annotated[list[str] | None, "容器命令参数"] = None,
+    cmd: Annotated[list[str] | None, "容器命令参数；每个元素不能含空格（trim-cli 按空格切分）"] = None,
     port_mappings: Annotated[list[str] | None, "端口映射，如 8080:80"] = None,
     mount_mappings: Annotated[list[str] | None, "挂载映射，如 /vol1/1000/app:/data"] = None,
     profile: Profile = None,
@@ -2060,6 +2092,12 @@ def docker_container_create(
 
     支持端口/挂载映射、环境变量、内存/CPU 限制与启动策略。
     创建后可用 docker_containers(--all) 与 docker_container_action 管理。
+
+    ⚠️ cmd 的限制：trim-cli 的 --cmd 会按空格重新切分，所以
+    cmd=["sh","-c","sleep 300"] 实际落成 ["sh","-c","sleep","300"]，
+    ["sh","-c","while true; do ...; done"] 这类命令会直接跑挂。需要带空格
+    的参数时改用 docker_request(endpoint="containerCreate", body={...})
+    传原始 Cmd 数组。
     """
     args = ["docker", "container", "create", "--image", image]
     if name:
@@ -2110,13 +2148,17 @@ def docker_container_top(
 
 @mcp.tool
 def docker_container_stats(
-    container_id: Annotated[str, "容器 ID"],
+    container_id: Annotated[str, "容器 ID（64 位十六进制，取自 docker_containers 的 id 字段；传容器名会静默返回空）"],
     profile: Profile = None,
     host: Host = None,
     port: Port = None,
     scheme: Scheme = None,
 ) -> str:
-    """查看单个容器的资源占用统计。"""
+    """查看单个容器的资源占用统计（cpuUsage / usedMem / networkRx / networkTx）。
+
+    注意：必须传 64 位容器 ID。传容器名时上游只返回
+    {"result":"succ"} 空壳，不报错，容易误判成"没有数据"。
+    """
     return _fmt(run_trim(["docker", "container", "stats", container_id], profile=profile, host=host, port=port, scheme=scheme))
 
 
@@ -2598,10 +2640,16 @@ def network_ssh_status(
     port: Port = None,
     scheme: Scheme = None,
 ) -> str:
-    """查询 SSH 服务状态。"""
-    # CLI 无独立 status 子命令，通过 switch 不带参数时的输出判断
-    result = run_trim(["network", "ssh", "switch"], profile=profile, host=host, port=port, scheme=scheme)
-    return _fmt(result)
+    """查询 SSH 服务状态（开关、端口、sftp）。
+
+    trim-cli 没有 status 子命令（`network ssh switch` 必须带 --enable 或
+    --disable，直接调用会报错），所以这里走原始端点
+    appcgi.network.ssh.status。
+    """
+    return _fmt(run_trim(
+        ["raw", "appcgi.network.ssh.status", "--yes"],
+        profile=profile, host=host, port=port, scheme=scheme,
+    ))
 
 
 @mcp.tool
@@ -3500,23 +3548,25 @@ def diagnostic_stop(
 
 @mcp.tool
 def raw_request(
-    request: Annotated[str, "系统业务原始请求端点，如 /ogh/v/xxx"],
-    method: Literal["get", "post", "put", "delete"] = "get",
-    body: Annotated[dict | None, "JSON 请求体"] = None,
+    request: Annotated[str, "系统业务原始请求端点，如 appcgi.network.ssh.status"],
+    body: Annotated[dict | None, "JSON 请求体（需要时传）"] = None,
     profile: Profile = None,
     host: Host = None,
     port: Port = None,
     scheme: Scheme = None,
 ) -> str:
-    """调用系统业务原始 API（兜底；仅内置审计过的只读端点可省略确认）。
+    """调用系统业务原始 API（兜底，特权入口）。
 
-    命令格式为 raw <METHOD> <REQUEST>；写方法一律带 --yes。
+    trim-cli 的命令格式是 `raw <REQ> [--json <body>] [--yes]`——**没有
+    method 位置参数**，GET/POST 由端点自身决定。非审计白名单里的端点
+    必须带 --yes，这里统一加，所以调用前请自己确认端点安全性。
+
+    例：raw_request("appcgi.network.ssh.status") 返回 SSH 开关状态。
     """
-    args = ["raw", method, request]
+    args = ["raw", request]
     if body is not None:
         args += ["--json", json.dumps(body, ensure_ascii=False)]
-    if method != "get":
-        args.append("--yes")
+    args.append("--yes")
     return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
 
 
