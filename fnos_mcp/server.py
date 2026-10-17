@@ -988,9 +988,11 @@ def file_write_text(
     if not dirpart or not name:
         return "路径无效：必须是 /vol{v}/... 形式的完整文件路径"
 
-    fd, tmp = tempfile.mkstemp(prefix="fnos-mcp-write-", suffix=".txt")
+    # 用目标文件名在临时目录里建文件，上传时远端才会得到正确文件名
+    tmpdir = tempfile.mkdtemp(prefix="fnos-mcp-write-")
+    tmp = os.path.join(tmpdir, name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        with open(tmp, "w", encoding="utf-8") as fh:
             fh.write(content)
         # 父目录缺失时逐级创建（file mkdir 支持递归建目录）
         parent_check = run_trim(
@@ -1012,10 +1014,16 @@ def file_write_text(
             return _fmt(result) + f"\n已写入 {path}（{len(content.encode('utf-8'))} 字节）"
         return _fmt(result)
     finally:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+        for p in (tmp, tmpdir):
+            try:
+                os.unlink(p)
+            except IsADirectoryError:
+                try:
+                    os.rmdir(p)
+                except OSError:
+                    pass
+            except OSError:
+                pass
 
 
 @mcp.tool
@@ -1908,22 +1916,118 @@ def docker_request(
 
 @mcp.tool
 def docker_compose_create(
-    body: Annotated[dict, "composeCreate 请求体（object，不含 req/reqid；上游 schema 未完全标准化，透传 fnOS API）"],
+    project_name: Annotated[str, "项目名，如 mcp-probe（compose ls 中显示的名称）"],
+    folder: Annotated[str, "compose 文件所在 NAS 目录，如 /vol1/1000/myapp；必须是干净的父目录，父目录自身不能已是一个 compose 项目"],
+    file: Annotated[str, "compose 文件名，默认 docker-compose.yaml"] = "docker-compose.yaml",
+    auto_build: Annotated[bool, "登记后自动执行 compose up -d（false 时仅登记，需手动 docker_compose_build）"] = False,
     profile: Profile = None,
     host: Host = None,
     port: Port = None,
     scheme: Scheme = None,
 ) -> str:
-    """创建 Docker Compose 项目（写操作；上游 composeCreate 透传封装）。
+    """登记 Docker Compose 项目（写操作；composeCreate 端点）。
 
-    固定子命令只有 compose ls，创建/启停走泛化端点
-    appcgi.dockermgr.composeCreate。body 为 fnOS API 的 JSON object，
-    不能包含 req/reqid。上游 schema 未完全文档化，字段以真机响应为准；
-    典型流程：先 docker_compose_ls 探测现有项目，创建后用
-    docker_request(composeContainers) 验证。
+    请求体真实结构（源自 fnOS 前端逆向）：{"auto_build": false,
+    "file": "docker-compose.yaml", "folder": "/vol1/1000/xxx",
+    "project_name": "xxx"}。compose 内容不在请求里——必须先用
+    file_write_text/file_upload 把 yaml 文件写入 folder，再调本工具。
+
+    典型流程：1) file_write_text 写 compose 文件；2) 本工具登记项目；
+    3) docker_compose_build(project_name) 真正拉起容器（compose up -d）；
+    4) docker_compose_containers(project_name) 验证。auto_build=true
+    可合并第 2/3 步。
+
+    注意：folder 的父目录若自身已带 compose 文件（如 /vol1/1000/docker
+    自带 docker-compose.yml），fnOS 会判定其为 compose 项目，嵌套创建
+    返回 errno 0x03200107（父级目录已存在项目），应换干净父目录；
+    0x03200102 表示 folder 下找不到 compose 文件。
     """
+    body = {
+        "project_name": project_name,
+        "folder": folder,
+        "file": file,
+        "auto_build": auto_build,
+    }
     args = ["docker", "request", "appcgi.dockermgr.composeCreate",
             "--json", json.dumps(body, ensure_ascii=False), "--yes"]
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def docker_compose_build(
+    project_name: Annotated[str, "项目名（composeCreate 登记时使用）"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """拉起 Compose 项目容器（写操作；composeBuild，等价 compose up -d）。
+
+    新登记的项目必须先 build 才有容器；composeStart 只对已 build 过的
+    项目生效（它仅执行 docker compose start，不创建容器）。
+    """
+    args = ["docker", "request", "appcgi.dockermgr.composeBuild",
+            "--json", json.dumps({"project_name": project_name}, ensure_ascii=False), "--yes"]
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def docker_compose_start(
+    project_name: Annotated[str, "项目名"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """启动已 build 的 Compose 项目（写操作；composeStart）。
+
+    仅执行 docker compose start，项目必须先 composeBuild 过；
+    未 build 的项目请用 docker_compose_build。
+    """
+    args = ["docker", "request", "appcgi.dockermgr.composeStart",
+            "--json", json.dumps({"project_name": project_name}, ensure_ascii=False), "--yes"]
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def docker_compose_stop(
+    project_name: Annotated[str, "项目名"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """停止 Compose 项目（写操作；composeStop，容器转 Exited）。"""
+    args = ["docker", "request", "appcgi.dockermgr.composeStop",
+            "--json", json.dumps({"project_name": project_name}, ensure_ascii=False), "--yes"]
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def docker_compose_delete(
+    project_name: Annotated[str, "项目名"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """删除 Compose 项目登记（写操作；composeDelete，项目列表清零）。"""
+    args = ["docker", "request", "appcgi.dockermgr.composeDelete",
+            "--json", json.dumps({"project_name": project_name}, ensure_ascii=False), "--yes"]
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def docker_compose_containers(
+    project_name: Annotated[str, "项目名"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """列出 Compose 项目下的容器（composeContainers）。"""
+    args = ["docker", "request", "appcgi.dockermgr.composeContainers",
+            "--json", json.dumps({"project_name": project_name}, ensure_ascii=False), "--yes"]
     return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
 
 
