@@ -72,6 +72,14 @@ vendor/trim-cli/trim-cli-linux-x64 --profile default --host <host> --port 443 --
 - 远程明文 HTTP 需 `allow_insecure_http=True`；自签 HTTPS 需 `tls_insecure=True`
 - 会话 token 自动刷新；连续 401 时需重新登录
 
+## 文件写入与 Compose 的坑（真机实测）
+
+- `file_write_text` 会在服务端临时目录里以目标文件名建文件再上传，远端文件名与 `path` 一致
+- `file_check_upload` 的 `overwrite` 默认是 `skip`（非破坏性）：目标已存在时返回 `{"result":"succ","skip":1}`，原文件不动
+- ⚠️ `file_check_upload(overwrite="replace")` 会**立刻把同名目标文件截断成 0 字节**，内容丢失且回收站里也没有。别用它"试探会不会冲突"，要覆盖直接调 `file_upload`
+- ⚠️ 预检在目标不存在时会留下 0 字节的 `<名字>.~#0` 占位文件。**不要用 `file_delete` 删它**：fnOS 的 rm 把 `X.~#0` 当作 X 的别名，会把同名目标文件一起删掉。占位文件会被后续 `file_upload` 覆盖，留着无害
+- 创建 compose 项目：先把 yaml 写进项目目录，再 `docker_compose_create`，最后 `docker_compose_build` 才真正 `compose up -d`。`docker_compose_start` 只执行 `docker compose start`，新项目还没容器时必然失败。项目目录不能嵌套在自带 compose 文件的目录下（如 `/vol1/1000/docker` 自身有 `docker-compose.yml`），否则 errno `0x03200107`
+
 ## 安全设计
 
 - 写操作命令一律显式传 `--yes`，避免 CLI 交互确认卡死 MCP 进程

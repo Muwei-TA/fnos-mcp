@@ -923,16 +923,24 @@ def file_trash_clear(
 def file_check_upload(
     path: Path,
     size: Annotated[int, "文件大小（字节）"],
-    overwrite: Literal["skip", "replace", "rename"] = "replace",
+    overwrite: Literal["skip", "replace", "rename"] = "skip",
     profile: Profile = None,
     host: Host = None,
     port: Port = None,
     scheme: Scheme = None,
 ) -> str:
-    """预检上传目标（写操作：探测远端占用与配额）。
+    """预检上传目标（探测远端占用与配额）。
 
-    返回远端同名文件状态与空间配额信息，用于在真正上传前确认
-    overwrite 策略。size 为计划上传的本地文件大小（字节）。
+    overwrite 默认 skip，这是非破坏性的：目标已存在时返回
+    {"result":"succ","skip":1} 表示会跳过，原文件不动。
+
+    警告（真机实测）：
+    - overwrite=replace 时上游 check-upload 会立刻把同名目标文件截断成
+      0 字节，内容丢失且回收站里也没有。别用它"试探会不会冲突"，要覆盖
+      直接调 file_upload。
+    - 目标不存在时上游会留下 0 字节的 <名字>.~#0 占位文件。不要用
+      file_delete 删它：fnOS 的 rm 把 X.~#0 当作 X 的别名，会连同名目标
+      文件一起删掉。占位文件会被后续 file_upload 覆盖，留着无害。
     """
     return _fmt(run_trim(
         ["file", "check-upload", path, str(size), "--overwrite", overwrite] + _bool_flag(True),
