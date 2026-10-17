@@ -74,6 +74,32 @@ def _bool_flag(value: bool) -> list[str]:
     return ["--yes"] if value else []
 
 
+def _multi_cmds(
+    commands: list[tuple[str, list[str]]],
+    profile: str | None,
+    host: str | None,
+    port: int | None,
+    scheme: str | None,
+) -> str:
+    """依次执行多条只读命令，合并为单个 JSON 返回（单条失败不影响其余）。"""
+    out: dict[str, Any] = {}
+    for key, args in commands:
+        r = run_trim(args, profile=profile, host=host, port=port, scheme=scheme)
+        if r["ok"]:
+            text = r["stdout"].strip()
+            if not text:
+                out[key] = "(无输出)"
+                continue
+            try:
+                out[key] = json.loads(text)
+            except (json.JSONDecodeError, TypeError):
+                out[key] = text
+        else:
+            err = (r["stderr"] or r["stdout"] or "").strip().splitlines()
+            out[key] = "失败: " + (err[-1] if err else f"exit {r['exit_code']}")
+    return json.dumps(out, ensure_ascii=False, indent=2)
+
+
 # ---------------------------------------------------------------------------
 # 认证与会话
 # ---------------------------------------------------------------------------
@@ -284,6 +310,65 @@ def system_power_plan(
     return _fmt(run_trim(["system", "power-plan"], profile=profile, host=host, port=port, scheme=scheme))
 
 
+# 系统 20 个只读信息命令中，system_info / system_hardware / system_volumes(=all-vols)
+# / system_power_plan 已有独立工具，其余 18 项聚合为 system_details，时区单列
+
+_SYSTEM_ITEMS: dict[str, list[str]] = {
+    "trim_version": ["system", "trim-version"],
+    "kernel_version": ["system", "kernel-version"],
+    "host_name": ["system", "host-name"],
+    "machine_id": ["system", "machine-id"],
+    "uptime": ["system", "uptime"],
+    "unix_time": ["system", "unix-time"],
+    "boot_on_power": ["system", "boot-on-power"],
+    "reserved_partition": ["system", "reserved-partition"],
+    "is_trim_machine": ["system", "is-trim-machine"],
+    "trim_feature": ["system", "trim-feature"],
+    "fan_mode": ["system", "fan-mode"],
+    "trim_disk": ["system", "trim-disk"],
+    "time_setting": ["system", "time-setting"],
+    "next_power_off_time": ["system", "next-power-off-time"],
+    "power_plan_status": ["system", "power-plan-status"],
+    "power_on_seconds": ["system", "power-on-seconds"],
+    "inited_timestamp": ["system", "inited-timestamp"],
+    "docker": ["system", "docker"],
+}
+
+
+@mcp.tool
+def system_details(
+    items: Annotated[
+        list[str] | None,
+        "要查询的条目（可选值：" + ", ".join(_SYSTEM_ITEMS) + "）；缺省查询全部",
+    ] = None,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """聚合查询系统只读信息（trim 版本、内核、主机名、uptime、风扇模式、
+    通电自启、下次定时关机、Docker 概要等 18 项；单条失败不影响其余）。"""
+    cmds = [(k, a) for k, a in _SYSTEM_ITEMS.items() if items is None or k in items]
+    if not cmds:
+        return "未匹配到任何条目。可用条目：" + ", ".join(_SYSTEM_ITEMS)
+    return _multi_cmds(cmds, profile, host, port, scheme)
+
+
+@mcp.tool
+def system_timezone_list(
+    lang: Annotated[str | None, "语言代码，如 zh-CN"] = None,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """列出系统支持的时区。"""
+    args = ["system", "timezone-list"]
+    if lang:
+        args += ["--lang", lang]
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
 # ---------------------------------------------------------------------------
 # 文件管理
 # ---------------------------------------------------------------------------
@@ -400,6 +485,346 @@ def file_trash_list(
     if path:
         args.append(path)
     return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def file_calc(
+    path: Path,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """计算目录统计信息（递归统计，与 file_size 的单条目大小不同）。"""
+    return _fmt(run_trim(["file", "calc", path], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def file_access(
+    path: Path,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """查询当前用户对文件/目录的访问权限。"""
+    return _fmt(run_trim(["file", "access", path], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def file_is_mount_point(
+    path: Path,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """判断路径是否为挂载点。"""
+    return _fmt(run_trim(["file", "is-mount-point", path], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def file_search_others(
+    keyword: Annotated[str, "搜索关键词"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """搜索其他用户共享的文件。"""
+    return _fmt(run_trim(["file", "search-others", keyword], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def file_task_cancel(
+    task_id: Annotated[str, "后台任务 ID"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """取消文件后台任务（搜索/压缩等长任务，写操作）。"""
+    return _fmt(run_trim(["file", "cancel", task_id] + _bool_flag(True), profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def file_search_cancel(
+    task_id: Annotated[str, "搜索任务 ID"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """取消全盘搜索任务（写操作）。"""
+    return _fmt(run_trim(["file", "search-cancel", task_id] + _bool_flag(True), profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def file_app_dir_list(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """列出应用专属目录（appdirs）。"""
+    return _fmt(run_trim(["file", "app-dir-list"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def file_sys_part_info(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """查看系统分区信息。"""
+    return _fmt(run_trim(["file", "sys-part-info"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def file_team_list(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """列出团队空间。"""
+    return _fmt(run_trim(["file", "team", "list"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def file_team_trash_list(
+    path: Annotated[str, "团队空间路径"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """列出指定团队空间的回收站。"""
+    return _fmt(run_trim(["file", "team", "trash-list", path], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def file_team_trash_bin(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """列出团队空间垃圾桶（trashbin，与分空间回收站不同）。"""
+    return _fmt(run_trim(["file", "team", "trash-list-trashbin"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def file_team_trash_restore(
+    paths: Annotated[list[str], "团队空间回收站内文件路径列表"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """从团队空间回收站恢复文件（写操作）。"""
+    return _fmt(run_trim(["file", "team", "trash-restore"] + paths + _bool_flag(True), profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def file_team_trash_clear(
+    vol: Annotated[str, "卷名，如 1 或 /vol1"],
+    team_dir: Annotated[str, "团队空间目录名"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """清空团队空间回收站（危险写操作，不可恢复）。"""
+    return _fmt(run_trim(["file", "team", "trash-clear", vol, team_dir] + _bool_flag(True), profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def file_fav_list(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """列出收藏的文件。"""
+    return _fmt(run_trim(["file", "fav", "list"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def file_fav_add(
+    path: Path,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """收藏文件/目录（写操作）。"""
+    return _fmt(run_trim(["file", "fav", "add", path] + _bool_flag(True), profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def file_fav_del(
+    path: Path,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """取消收藏（写操作）。"""
+    return _fmt(run_trim(["file", "fav", "del", path] + _bool_flag(True), profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def file_share_info(
+    path: Path,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """查询文件/目录的共享信息。"""
+    return _fmt(run_trim(["file", "share", "info", path], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def file_share_list(
+    uid: Annotated[str | None, "用户 UID，默认当前用户"] = None,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """列出指定用户的文件共享。"""
+    args = ["file", "share", "list"]
+    if uid:
+        args.append(uid)
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def file_share_list_others(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """列出其他用户的共享。"""
+    return _fmt(run_trim(["file", "share", "list-others"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def file_share_admin_list(
+    uid: Annotated[str | None, "用户 UID，缺省列出全部"] = None,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """管理员视角列出文件共享。"""
+    args = ["file", "share", "admin-list"]
+    if uid:
+        args.append(uid)
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def file_share_admin_list_others(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """管理员视角列出其他用户的共享。"""
+    return _fmt(run_trim(["file", "share", "admin-list-others"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def file_share_add(
+    path: Path,
+    share_name: Annotated[str, "共享名称"],
+    permset: Annotated[str, "权限集 ID 或名称"],
+    sub: bool = False,
+    acl_mode: Annotated[str | None, "ACL 模式"] = None,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """创建文件共享（写操作）。"""
+    args = ["file", "share", "add", path, share_name, "--permset", permset]
+    if sub:
+        args.append("--sub")
+    if acl_mode:
+        args += ["--acl-mode", acl_mode]
+    args += _bool_flag(True)
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def file_share_del(
+    path: Path,
+    sub: bool = False,
+    acl_mode: Annotated[str | None, "ACL 模式"] = None,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """删除文件共享（写操作）。"""
+    args = ["file", "share", "del", path]
+    if sub:
+        args.append("--sub")
+    if acl_mode:
+        args += ["--acl-mode", acl_mode]
+    args += _bool_flag(True)
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def file_acl_get(
+    path: Path,
+    prop: bool = False,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """查询文件 ACL 权限。"""
+    args = ["file", "acl", "get", path]
+    if prop:
+        args.append("--prop")
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def file_acl_set(
+    path: Path,
+    permset: Annotated[str, "权限集 ID 或名称"],
+    sub: Annotated[int, "是否应用到子项：0 否 / 1 是"] = 0,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """设置文件 ACL 权限（写操作，可能批量影响子项）。"""
+    return _fmt(run_trim(
+        ["file", "acl", "set", path, "--permset", permset, "--sub", str(sub)] + _bool_flag(True),
+        profile=profile, host=host, port=port, scheme=scheme,
+    ))
+
+
+@mcp.tool
+def file_trimacl_report(
+    vol: Annotated[str, "卷名，如 1"],
+    csv_path: Annotated[str, "报告保存路径（NAS 上）"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """导出卷 ACL 迁移报告（写操作，生成 CSV 报告文件）。"""
+    return _fmt(run_trim(["file", "trimacl", "report", vol, csv_path] + _bool_flag(True), profile=profile, host=host, port=port, scheme=scheme))
 
 
 # ----- 文件写操作（一律显式 --yes） -----
@@ -591,6 +1016,67 @@ def file_write_text(
             os.unlink(tmp)
         except OSError:
             pass
+
+
+@mcp.tool
+def file_compress(
+    output_path: Annotated[str, "输出压缩包路径（NAS 上），如 /vol1/1000/backup.zip"],
+    source_paths: Annotated[list[str], "源文件/目录路径列表（NAS 上）"],
+    level: Annotated[int | None, "压缩级别 0-9"] = None,
+    password: Annotated[str | None, "压缩包密码"] = None,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """压缩文件/目录为压缩包（写操作）。"""
+    args = ["file", "compress", output_path] + source_paths
+    if level is not None:
+        args += ["--level", str(level)]
+    if password:
+        args += ["--password", password]
+    args += _bool_flag(True)
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme, timeout=1800))
+
+
+@mcp.tool
+def file_extract(
+    archive_path: Annotated[str, "压缩包路径（NAS 上）"],
+    output_dir: Annotated[str, "解压目标目录（NAS 上）"],
+    overwrite: Literal["skip", "replace", "rename"] = "replace",
+    password: Annotated[str | None, "压缩包密码（加密包需要）"] = None,
+    from_charset: Annotated[str | None, "压缩包内文件名原始编码，如 gbk"] = None,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """解压压缩包到指定目录（写操作）。"""
+    args = ["file", "extract", archive_path, output_dir, "--overwrite", overwrite]
+    if password:
+        args += ["--password", password]
+    if from_charset:
+        args += ["--from-charset", from_charset]
+    args += _bool_flag(True)
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme, timeout=1800))
+
+
+@mcp.tool
+def file_chown(
+    path: Path,
+    uid: Annotated[str, "目标 UID（用户 ID）"],
+    sub: bool = False,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """修改文件/目录属主（写操作；sub=True 递归应用到子项）。"""
+    args = ["file", "chown", path, "--uid", uid]
+    if sub:
+        args.append("--sub")
+    args += _bool_flag(True)
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
 
 
 # ---------------------------------------------------------------------------
@@ -818,6 +1304,470 @@ def app_restart(
     return _fmt(run_trim(["app", "restart", app_name] + _bool_flag(True), profile=profile, host=host, port=port, scheme=scheme))
 
 
+@mcp.tool
+def app_update(
+    app_name: Annotated[str, "应用名"],
+    version: Annotated[str, "目标版本"],
+    volume_id: Annotated[str | None, "安装目标卷 ID"] = None,
+    data_volume_id: Annotated[str | None, "数据卷 ID"] = None,
+    accept_license: bool = True,
+    no_start: bool = False,
+    dry_run: bool = False,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """升级应用到指定版本（写操作）。dry_run=True 仅预演。"""
+    args = ["app", "update", app_name, "--version", version]
+    if volume_id:
+        args += ["--volume-id", volume_id]
+    if data_volume_id:
+        args += ["--data-volume-id", data_volume_id]
+    if accept_license:
+        args.append("--accept-license")
+    if no_start:
+        args.append("--no-start")
+    if dry_run:
+        args.append("--dry-run")
+    args.append("--yes")
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def app_task_status(
+    task_id: Annotated[str, "应用任务 ID（安装/更新等）"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """查询应用任务进度（安装/更新/卸载等）。"""
+    return _fmt(run_trim(["app", "task-status", task_id], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def app_task_cancel(
+    task_id: Annotated[str, "应用任务 ID"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """取消应用任务（写操作）。"""
+    return _fmt(run_trim(["app", "task-cancel", task_id] + _bool_flag(True), profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def app_install_cancel(
+    task_id: Annotated[str, "安装任务 ID"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """取消应用安装任务（写操作）。"""
+    return _fmt(run_trim(["app", "install-cancel", task_id] + _bool_flag(True), profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def app_update_cancel(
+    task_id: Annotated[str, "更新任务 ID"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """取消应用更新任务（写操作）。"""
+    return _fmt(run_trim(["app", "update-cancel", task_id] + _bool_flag(True), profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def app_download_cancel(
+    task_id: Annotated[str, "应用下载任务 ID"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """取消应用商店下载任务（写操作）。"""
+    return _fmt(run_trim(["app", "download", "cancel", task_id] + _bool_flag(True), profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def app_install_fpk(
+    remote_path: Annotated[str, "NAS 上的 fpk 安装包路径"] = "",
+    local_file: Annotated[str | None, "服务器本地 fpk 文件路径（二选一）"] = None,
+    volume_id: Annotated[str | None, "安装目标卷 ID"] = None,
+    data_volume_id: Annotated[str | None, "数据卷 ID"] = None,
+    custom_parameters: Annotated[list | None, "自定义参数（jsonArray）"] = None,
+    api_scope: Annotated[dict | None, "API 权限范围（jsonObject）"] = None,
+    accept_license: bool = True,
+    cancel_on_failure: bool = False,
+    no_start: bool = False,
+    dry_run: bool = False,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """从 fpk 离线安装包安装应用（写操作；remote_path 或 local_file 二选一）。"""
+    args = ["app", "install-fpk"]
+    if local_file:
+        args.append(local_file)
+    if remote_path:
+        args += ["--remote-path", remote_path]
+    if volume_id:
+        args += ["--volume-id", volume_id]
+    if data_volume_id:
+        args += ["--data-volume-id", data_volume_id]
+    if custom_parameters is not None:
+        args += ["--custom-parameters", json.dumps(custom_parameters, ensure_ascii=False)]
+    if api_scope is not None:
+        args += ["--api-scope", json.dumps(api_scope, ensure_ascii=False)]
+    if accept_license:
+        args.append("--accept-license")
+    if cancel_on_failure:
+        args.append("--cancel-on-failure")
+    if no_start:
+        args.append("--no-start")
+    if dry_run:
+        args.append("--dry-run")
+    args.append("--yes")
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def app_task_action(
+    task_id: Annotated[str, "任务 ID"],
+    action: Literal["task-cancel", "install-cancel", "update-cancel", "download-cancel"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """按类型取消应用任务（写操作，聚合入口）。
+
+    action 对应 CLI 子命令：task-cancel / install-cancel /
+    update-cancel / app download cancel。
+    """
+    if action == "download-cancel":
+        args = ["app", "download", "cancel", task_id]
+    else:
+        args = ["app", action, task_id]
+    return _fmt(run_trim(args + _bool_flag(True), profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def app_config_list(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """列出所有应用的配置项。"""
+    return _fmt(run_trim(["app", "config", "list"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def app_config_detail(
+    app_name: Annotated[str, "应用名"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """查看指定应用的配置项详情。"""
+    return _fmt(run_trim(["app", "config", "detail", app_name], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def app_config_sys(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """查看应用中心系统配置。"""
+    return _fmt(run_trim(["app", "config", "sys"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def app_config_auth_paths(
+    app_name: Annotated[str, "应用名"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """查看应用的鉴权路径配置。"""
+    return _fmt(run_trim(["app", "config", "auth-paths", app_name], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def app_config_wizard(
+    app_name: Annotated[str, "应用名"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """获取应用配置向导数据（安装向导表单定义）。"""
+    return _fmt(run_trim(["app", "config", "wizard", app_name], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def app_config_set(
+    app_name: Annotated[str, "应用名"],
+    fields: Annotated[dict, "要写入的配置字段（JSON object）"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """修改应用配置项（写操作）。fields 为 JSON object 透传。"""
+    return _fmt(run_trim(
+        ["app", "config", "set", app_name, "--fields", json.dumps(fields, ensure_ascii=False)] + _bool_flag(True),
+        profile=profile, host=host, port=port, scheme=scheme,
+    ))
+
+
+@mcp.tool
+def app_config_set_sys(
+    fields: Annotated[dict, "要写入的系统配置字段（JSON object）"],
+    allow_desktop_icon_field: bool = False,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """修改应用中心系统配置（写操作，影响全局应用行为）。"""
+    args = ["app", "config", "set-sys", "--fields", json.dumps(fields, ensure_ascii=False)]
+    if allow_desktop_icon_field:
+        args.append("--allow-desktop-icon-field")
+    args += _bool_flag(True)
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def app_config_auto_update(
+    app_name: Annotated[str, "应用名"],
+    enable: bool,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """开启/关闭应用自动更新（写操作）。"""
+    flag = "--enable" if enable else "--disable"
+    return _fmt(run_trim(
+        ["app", "config", "auto-update", app_name, flag, "--yes"],
+        profile=profile, host=host, port=port, scheme=scheme,
+    ))
+
+
+@mcp.tool
+def app_config_proxy_access(
+    app_name: Annotated[str, "应用名"],
+    allow: bool,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """允许/禁止应用的外网代理访问（写操作）。"""
+    flag = "--allowed" if allow else "--denied"
+    return _fmt(run_trim(
+        ["app", "config", "proxy-access", app_name, flag, "--yes"],
+        profile=profile, host=host, port=port, scheme=scheme,
+    ))
+
+
+@mcp.tool
+def app_openapi_app_detail(
+    app_name: Annotated[str, "应用名"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """查询应用 OpenAPI 详情。"""
+    return _fmt(run_trim(["app", "openapi", "app-detail", app_name], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def app_openapi_allow_auth_paths(
+    app_name: Annotated[str, "应用名"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """查询应用 OpenAPI 允许的鉴权路径。"""
+    return _fmt(run_trim(["app", "openapi", "allow-user-auth-paths", app_name], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def app_openapi_add_auth_path(
+    app_name: Annotated[str, "应用名"],
+    path: Annotated[str, "鉴权路径"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """为应用添加 OpenAPI 鉴权路径（写操作）。"""
+    return _fmt(run_trim(["app", "openapi", "add-user-auth-path", app_name, path] + _bool_flag(True), profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def app_openapi_add_auth_inherit_file(
+    app_name: Annotated[str, "应用名"],
+    path: Annotated[str, "鉴权继承文件路径"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """为应用添加 OpenAPI 鉴权继承文件（写操作）。"""
+    return _fmt(run_trim(["app", "openapi", "add-user-auth-inherit-file", app_name, path] + _bool_flag(True), profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def app_store_list(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """列出应用商店全部应用。"""
+    return _fmt(run_trim(["app", "store", "list"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def app_store_latest_release(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """获取应用商店最新上架应用。"""
+    return _fmt(run_trim(["app", "store", "latest-release"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def app_guide_check_installed(
+    app_names: Annotated[list[str], "应用名列表"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """批量检查应用是否已安装（装机引导）。"""
+    return _fmt(run_trim(["app", "guide", "check-installed"] + app_names, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def app_guide_batch_install(
+    volume_id: Annotated[str, "安装目标卷 ID"],
+    app_names: Annotated[list[str], "应用名列表"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """批量安装商店应用（写操作，装机引导流程）。"""
+    return _fmt(run_trim(
+        ["app", "guide", "batch-download-install", volume_id] + app_names + _bool_flag(True),
+        profile=profile, host=host, port=port, scheme=scheme,
+    ))
+
+
+@mcp.tool
+def app_base_data(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """获取应用中心基础数据。"""
+    return _fmt(run_trim(["app", "base-data"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def app_sac_store_list(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """获取 SAC 应用商店列表（应用推荐数据源）。"""
+    return _fmt(run_trim(["app", "sac", "app-store-list"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def app_service_list(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """列出应用提供的服务。"""
+    return _fmt(run_trim(["app", "service", "list"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def app_entry_list(
+    only_hidden: bool = False,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """列出应用入口；only_hidden=True 仅列出隐藏入口。"""
+    args = ["app", "entry", "list"]
+    if only_hidden:
+        args.append("--only-hidden")
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def app_desktop_list(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """列出桌面应用图标。"""
+    return _fmt(run_trim(["app", "desktop", "list"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def app_operation_settings(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """查看应用运营设置。"""
+    return _fmt(run_trim(["app", "operation", "settings"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def app_common_volume(
+    set_volume: Annotated[str | None, "要设置的应用公共卷（写操作，缺省仅查询）"] = None,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """查询/设置应用公共卷（set_volume 非空时为写操作）。"""
+    args = ["app", "common", "volume"]
+    if set_volume:
+        args += ["--set", set_volume, "--yes"]
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
 # ---------------------------------------------------------------------------
 # Docker
 # ---------------------------------------------------------------------------
@@ -1022,6 +1972,77 @@ def docker_container_create(
     return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
 
 
+@mcp.tool
+def docker_container_inspect(
+    container_id: Annotated[str, "容器 ID"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """查看容器详细配置（inspect）。"""
+    return _fmt(run_trim(["docker", "container", "inspect", container_id], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def docker_container_top(
+    container_id: Annotated[str, "容器 ID"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """查看容器内进程列表（top）。"""
+    return _fmt(run_trim(["docker", "container", "top", container_id], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def docker_container_stats(
+    container_id: Annotated[str, "容器 ID"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """查看单个容器的资源占用统计。"""
+    return _fmt(run_trim(["docker", "container", "stats", container_id], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def docker_container_update(
+    container_id: Annotated[str, "容器 ID"],
+    restart: bool = False,
+    memory_mb: Annotated[int | None, "内存上限（MB）"] = None,
+    cpu_shares: Annotated[int | None, "CPU 权重（shares）"] = None,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """更新容器配置（写操作）：重启策略 / 内存 / CPU 限制。"""
+    args = ["docker", "container", "update", container_id]
+    if restart:
+        args.append("--restart")
+    if memory_mb is not None:
+        args += ["--memory", str(memory_mb)]
+    if cpu_shares is not None:
+        args += ["--cpu", str(cpu_shares)]
+    args.append("--yes")
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def docker_image_inspect(
+    image_ref: Annotated[str, "镜像引用，如 nginx:latest"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """查看镜像详细信息（inspect）。"""
+    return _fmt(run_trim(["docker", "image", "inspect", image_ref], profile=profile, host=host, port=port, scheme=scheme))
+
+
 # ---------------------------------------------------------------------------
 # 下载
 # ---------------------------------------------------------------------------
@@ -1094,6 +2115,47 @@ def download_action(
     ))
 
 
+@mcp.tool
+def download_stats(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """查看下载中心全局统计。"""
+    return _fmt(run_trim(["download", "stat"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def download_add_path(
+    path: Annotated[str, "NAS 上已有的种子/文件路径"],
+    save_dir: Annotated[str, "保存目录"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """从 NAS 本地路径新建下载任务（写操作，如 .torrent 文件）。"""
+    return _fmt(run_trim(["download", "add-path", path, save_dir] + _bool_flag(True), profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def download_request(
+    endpoint: Annotated[str, "下载中心原始端点"],
+    body: Annotated[dict | None, "JSON 请求体"] = None,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """调用下载中心原始 API（兜底；写方法自动带 --yes）。"""
+    args = ["download", "request", endpoint]
+    if body is not None:
+        args += ["--json", json.dumps(body, ensure_ascii=False)]
+    args.append("--yes")
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
 # ---------------------------------------------------------------------------
 # 日志
 # ---------------------------------------------------------------------------
@@ -1140,6 +2202,71 @@ def logger_export(
 ) -> str:
     """导出日志（写操作）。"""
     return _fmt(run_trim(["logger", "export", "--level", level, "--module", module, "--yes"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def logger_clear(
+    level: Annotated[str, "日志级别，如 info/warning/error"],
+    module: Annotated[str, "模块名"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """清除指定级别/模块的日志（危险写操作，不可恢复）。"""
+    return _fmt(run_trim(["logger", "clear", "--level", level, "--module", module, "--yes"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def logger_archive_query(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """查询日志归档配置。"""
+    return _fmt(run_trim(["logger", "archive", "query"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def logger_archive_set(
+    switch: Annotated[str, "归档开关状态值"],
+    file_path: Annotated[str, "归档保存路径（NAS 上）"],
+    size_gt: Annotated[str | None, "大小阈值"] = None,
+    date_unit: Annotated[str | None, "日期单位"] = None,
+    date_before: Annotated[str | None, "归档日期阈值"] = None,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """设置日志归档配置（写操作；switch/file_path 必填，其余可选）。"""
+    args = ["logger", "archive", "set", "--switch", switch, "--file-path", file_path]
+    if size_gt:
+        args += ["--size-gt", size_gt]
+    if date_unit:
+        args += ["--date-unit", date_unit]
+    if date_before:
+        args += ["--date-before", date_before]
+    args.append("--yes")
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def logger_debuglog(
+    output_dir: Annotated[str, "服务器本地输出目录"],
+    srv_type: Annotated[str | None, "服务类型过滤"] = None,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """开始复制调试日志到本地目录（写操作，生成诊断数据）。"""
+    args = ["logger", "debuglog", "copy-start", "--output-dir", output_dir]
+    if srv_type:
+        args += ["--srv-type", srv_type]
+    args.append("--yes")
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
 
 
 # ---------------------------------------------------------------------------
@@ -1221,6 +2348,131 @@ def monitor_warnings(
 ) -> str:
     """查看系统告警。"""
     return _fmt(run_trim(["monitor", "sys-warn"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def monitor_npu(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """查看 NPU 使用率。"""
+    return _fmt(run_trim(["monitor", "npu"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def monitor_battery(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """查看电池状态（笔记本/UPS 场景）。"""
+    return _fmt(run_trim(["monitor", "battery"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def monitor_fan(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """查看系统风扇转速。"""
+    return _fmt(run_trim(["monitor", "sys-fan"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def monitor_proc_info(
+    pids: Annotated[list[int], "进程 PID 列表（至少一个）"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """查询指定进程的详细监控信息。"""
+    return _fmt(run_trim(
+        ["monitor", "proc-info", "--pids", ",".join(str(p) for p in pids)],
+        profile=profile, host=host, port=port, scheme=scheme,
+    ))
+
+
+@mcp.tool
+def monitor_proc_services(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """查询系统服务进程监控。"""
+    return _fmt(run_trim(["monitor", "proc-srv"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def monitor_beep_supported(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """查询是否支持蜂鸣器。"""
+    return _fmt(run_trim(["monitor", "beep-supported"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def monitor_beep_events(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """查询蜂鸣器事件记录。"""
+    return _fmt(run_trim(["monitor", "beep-events"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def monitor_beep_reasons(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """查询蜂鸣器鸣叫原因。"""
+    return _fmt(run_trim(["monitor", "beep-reasons"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def monitor_mute_beeper(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """静音蜂鸣器（写操作）。"""
+    return _fmt(run_trim(["monitor", "mute-beeper", "--yes"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def monitor_metrics(
+    items: Annotated[
+        list[Literal["storeSpeed", "netSpeed", "cpuBusy", "memPercent"]],
+        "要查询的指标列表（至少一个）",
+    ],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """按指标名批量查询监控数据（gen 通用入口）。
+
+    可选指标：storeSpeed（存储吞吐）、netSpeed（网速）、
+    cpuBusy（CPU 忙碌）、memPercent（内存占用）。
+    """
+    args = ["monitor", "gen"]
+    for i in items:
+        args += ["--item", i]
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
 
 
 # ---------------------------------------------------------------------------
@@ -1354,6 +2606,93 @@ def storage_space(
     return _fmt(run_trim(["storage", "space"], profile=profile, host=host, port=port, scheme=scheme))
 
 
+@mcp.tool
+def storage_free_disks(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """列出未加入存储池的空闲硬盘。"""
+    return _fmt(run_trim(["storage", "free-disks"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def storage_removable(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """列出可移动设备（U 盘/移动硬盘）。"""
+    return _fmt(run_trim(["storage", "removable"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def storage_disk_info(
+    disk: Annotated[str, "硬盘标识，如 sda"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """查看硬盘详细信息。"""
+    return _fmt(run_trim(["storage", "disk-info", disk], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def storage_mount(
+    uuid: Annotated[str, "存储空间 UUID"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """挂载存储空间（写操作）。"""
+    return _fmt(run_trim(["storage", "mount", uuid] + _bool_flag(True), profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def storage_umount(
+    uuid: Annotated[str, "存储空间 UUID"],
+    admin_password: Annotated[str | None, "管理员密码（系统要求时）"] = None,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """卸载存储空间（写操作；部分场景需管理员密码）。"""
+    args = ["storage", "umount", uuid]
+    if admin_password:
+        args += ["--password", admin_password]
+    args += _bool_flag(True)
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def storage_disk_mount(
+    disk: Annotated[str, "硬盘标识，如 sdb"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """挂载独立硬盘（写操作）。"""
+    return _fmt(run_trim(["storage", "disk-mount", disk] + _bool_flag(True), profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def storage_disk_umount(
+    disk: Annotated[str, "硬盘标识，如 sdb"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """卸载独立硬盘（写操作）。"""
+    return _fmt(run_trim(["storage", "disk-umount", disk] + _bool_flag(True), profile=profile, host=host, port=port, scheme=scheme))
+
+
 # ---------------------------------------------------------------------------
 # 用户
 # ---------------------------------------------------------------------------
@@ -1405,6 +2744,252 @@ def user_group_info(
 ) -> str:
     """查询用户组详情。"""
     return _fmt(run_trim(["user", "group-info", group], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def user_frozen_list(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """列出被冻结的账号。"""
+    return _fmt(run_trim(["user", "frozen-list"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def user_list_ug(
+    users: bool = True,
+    groups: bool = True,
+    uver: Annotated[int | None, "数据版本号（增量同步用），如 0"] = None,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """列出用户与用户组（可带版本号做增量查询）。"""
+    args = ["user", "list-ug"]
+    if users:
+        args.append("--users")
+    if groups:
+        args.append("--groups")
+    if uver is not None:
+        args += ["--uver", str(uver)]
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def user_group_users(
+    uver: Annotated[int, "数据版本号（首次传 0），如 0"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """查询用户组成员关系（按版本增量）。"""
+    return _fmt(run_trim(["user", "group-users", "--uver", str(uver)], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def user_login_devices(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """列出当前用户的登录设备。"""
+    return _fmt(run_trim(["user", "list-login-device"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def user_group_add(
+    group: Annotated[str, "新用户组名"],
+    comment: Annotated[str | None, "备注"] = None,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """创建用户组（写操作）。"""
+    args = ["user", "group-add", group]
+    if comment:
+        args += ["--comment", comment]
+    args += _bool_flag(True)
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def user_group_mod(
+    group: Annotated[str, "用户组名"],
+    new_name: Annotated[str | None, "新组名"] = None,
+    comment: Annotated[str | None, "新备注"] = None,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """修改用户组（写操作）。"""
+    args = ["user", "group-mod", group]
+    if new_name:
+        args += ["--new-name", new_name]
+    if comment:
+        args += ["--comment", comment]
+    args += _bool_flag(True)
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def user_group_del(
+    group: Annotated[str, "用户组名"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """删除用户组（危险写操作）。"""
+    return _fmt(run_trim(["user", "group-del", group] + _bool_flag(True), profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def user_group_set_users(
+    group: Annotated[str, "用户组名"],
+    users: Annotated[list[str], "成员用户名列表（全量覆盖）"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """整组设置用户组成员（写操作，覆盖原有成员）。"""
+    return _fmt(run_trim(
+        ["user", "group-set-users", group, "--users", ",".join(users)] + _bool_flag(True),
+        profile=profile, host=host, port=port, scheme=scheme,
+    ))
+
+
+@mcp.tool
+def user_group_add_users(
+    group: Annotated[str, "用户组名"],
+    users: Annotated[list[str], "要添加的用户名列表"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """向用户组添加成员（写操作）。"""
+    return _fmt(run_trim(
+        ["user", "group-add-users", group, "--users", ",".join(users)] + _bool_flag(True),
+        profile=profile, host=host, port=port, scheme=scheme,
+    ))
+
+
+@mcp.tool
+def user_group_del_users(
+    group: Annotated[str, "用户组名"],
+    users: Annotated[list[str], "要移除的用户名列表"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """从用户组移除成员（写操作）。"""
+    return _fmt(run_trim(
+        ["user", "group-del-users", group, "--users", ",".join(users)] + _bool_flag(True),
+        profile=profile, host=host, port=port, scheme=scheme,
+    ))
+
+
+@mcp.tool
+def user_add(
+    user: Annotated[str, "新用户名"],
+    password: Annotated[str | None, "初始密码"] = None,
+    groups: Annotated[list[str] | None, "所属用户组列表"] = None,
+    comment: Annotated[str | None, "备注"] = None,
+    email: Annotated[str | None, "邮箱"] = None,
+    mobile: Annotated[str | None, "手机号"] = None,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """创建 NAS 用户（写操作）。"""
+    args = ["user", "add", user]
+    if password:
+        args += ["--password", password]
+    if groups:
+        args += ["--groups", ",".join(groups)]
+    if comment:
+        args += ["--comment", comment]
+    if email:
+        args += ["--email", email]
+    if mobile:
+        args += ["--mobile", mobile]
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def user_mod(
+    user: Annotated[str, "用户名"],
+    new_name: Annotated[str | None, "新用户名"] = None,
+    password: Annotated[str | None, "新密码"] = None,
+    groups: Annotated[list[str] | None, "所属用户组列表（覆盖）"] = None,
+    comment: Annotated[str | None, "备注"] = None,
+    email: Annotated[str | None, "邮箱"] = None,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """修改 NAS 用户信息（写操作）。"""
+    args = ["user", "mod", user]
+    if new_name:
+        args += ["--new-name", new_name]
+    if password:
+        args += ["--password", password]
+    if groups:
+        args += ["--groups", ",".join(groups)]
+    if comment:
+        args += ["--comment", comment]
+    if email:
+        args += ["--email", email]
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def user_del(
+    user: Annotated[str, "用户名"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """删除 NAS 用户（危险写操作）。"""
+    return _fmt(run_trim(["user", "del", user] + _bool_flag(True), profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def user_set_admin(
+    user: Annotated[str, "用户名"],
+    on: bool,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """授予/撤销用户管理员权限（写操作）。"""
+    flag = "--on" if on else "--off"
+    return _fmt(run_trim(["user", "set-admin", user, flag, "--yes"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def user_unfreeze(
+    user: Annotated[str, "用户名"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """解冻被冻结的账号（写操作）。"""
+    return _fmt(run_trim(["user", "unfreeze", user] + _bool_flag(True), profile=profile, host=host, port=port, scheme=scheme))
 
 
 # ---------------------------------------------------------------------------
@@ -1483,6 +3068,318 @@ def baidu_mkdir(
 ) -> str:
     """在百度网盘创建目录（写操作）。"""
     return _fmt(run_trim(["baidu-netdisk", "mkdir", path] + _bool_flag(True), profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def baidu_info(
+    fsids: Annotated[list[str], "文件 fsid 列表（ls/search 结果中获取）"],
+    dlink: bool = False,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """查询网盘文件详细信息（可含下载直链 dlink）。"""
+    args = ["baidu-netdisk", "info"] + fsids
+    if dlink:
+        args.append("--dlink")
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def baidu_delete(
+    paths: Annotated[list[str], "网盘内文件路径列表"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """删除网盘文件（写操作，进入网盘回收站）。"""
+    return _fmt(run_trim(["baidu-netdisk", "rm"] + paths + _bool_flag(True), profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def baidu_rename(
+    path: Annotated[str, "网盘内文件路径"],
+    new_name: Annotated[str, "新名称（不含路径）"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """重命名网盘文件（写操作）。"""
+    return _fmt(run_trim(["baidu-netdisk", "rename", path, new_name] + _bool_flag(True), profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def baidu_move(
+    src_paths: Annotated[list[str], "源路径列表（最后一项为目标目录）"],
+    ondup: Literal["fail", "newcopy", "overwrite", "skip"] = "fail",
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """移动网盘文件（写操作；src_paths 最后一项为目标目录）。"""
+    return _fmt(run_trim(
+        ["baidu-netdisk", "move"] + src_paths + ["--ondup", ondup] + _bool_flag(True),
+        profile=profile, host=host, port=port, scheme=scheme,
+    ))
+
+
+@mcp.tool
+def baidu_copy(
+    src_paths: Annotated[list[str], "源路径列表（最后一项为目标目录）"],
+    ondup: Literal["fail", "newcopy", "overwrite", "skip"] = "fail",
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """复制网盘文件（写操作；src_paths 最后一项为目标目录）。"""
+    return _fmt(run_trim(
+        ["baidu-netdisk", "copy"] + src_paths + ["--ondup", ondup] + _bool_flag(True),
+        profile=profile, host=host, port=port, scheme=scheme,
+    ))
+
+
+@mcp.tool
+def baidu_upload(
+    target_path: Annotated[str, "网盘目标目录"],
+    local_files: Annotated[list[str], "服务器本地文件路径列表"],
+    conflict: Literal["fail", "rename", "overwrite"] = "rename",
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """上传本地文件到网盘（写操作）。"""
+    return _fmt(run_trim(
+        ["baidu-netdisk", "upload", target_path] + local_files + ["--conflict", conflict] + _bool_flag(True),
+        profile=profile, host=host, port=port, scheme=scheme, timeout=1800,
+    ))
+
+
+@mcp.tool
+def baidu_download(
+    target_path: Annotated[str, "NAS 保存目录"],
+    fsids: Annotated[list[str], "要下载的文件 fsid 列表"],
+    conflict: Literal["fail", "rename", "overwrite"] = "rename",
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """从网盘下载文件到 NAS（写操作）。"""
+    return _fmt(run_trim(
+        ["baidu-netdisk", "download", target_path] + fsids + ["--conflict", conflict] + _bool_flag(True),
+        profile=profile, host=host, port=port, scheme=scheme, timeout=1800,
+    ))
+
+
+@mcp.tool
+def baidu_share_save(
+    share_url: Annotated[str, "分享链接 URL"],
+    target_path: Annotated[str, "转存目标目录（网盘内）"],
+    password: Annotated[str | None, "分享提取码"] = None,
+    fsid: Annotated[str | None, "仅转存指定 fsid 的内容"] = None,
+    save_all: bool = False,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """转存分享链接内容到网盘（写操作）。"""
+    args = ["baidu-netdisk", "share-save", share_url, target_path]
+    if password:
+        args += ["--password", password]
+    if fsid:
+        args += ["--fsid", fsid]
+    if save_all:
+        args.append("--all")
+    args += _bool_flag(True)
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def baidu_task_list(
+    transfer: Literal["upload", "download"],
+    state: Literal["running", "completed"] = "running",
+    page: int = 1,
+    page_size: int = 50,
+    sort_by: Literal["name", "size", "status"] = "name",
+    ascending: bool = False,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """列出网盘上传/下载传输任务。"""
+    args = [
+        "baidu-netdisk", "task", "list",
+        "--transfer", transfer, "--state", state,
+        "--page", str(page), "--page-size", str(page_size),
+        "--sort-by", sort_by,
+    ]
+    if ascending:
+        args.append("--ascending")
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def baidu_task_info(
+    task_id: Annotated[str, "任务 ID"],
+    transfer: Literal["upload", "download"] = "download",
+    state: Literal["running", "completed"] = "running",
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """查询网盘传输任务详情。"""
+    return _fmt(run_trim(
+        ["baidu-netdisk", "task", "info", task_id, "--transfer", transfer, "--state", state],
+        profile=profile, host=host, port=port, scheme=scheme,
+    ))
+
+
+@mcp.tool
+def baidu_task_action(
+    task_ids: Annotated[list[str], "任务 ID 列表"],
+    action: Literal["pause", "resume", "cancel"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """批量操作网盘传输任务（写操作）：pause / resume / cancel。"""
+    return _fmt(run_trim(
+        ["baidu-netdisk", "task", action] + task_ids + _bool_flag(True),
+        profile=profile, host=host, port=port, scheme=scheme,
+    ))
+
+
+@mcp.tool
+def baidu_task_clear(
+    transfer: Literal["upload", "download"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """清空网盘传输任务记录（写操作）。"""
+    return _fmt(run_trim(
+        ["baidu-netdisk", "task", "clear", "--transfer", transfer] + _bool_flag(True),
+        profile=profile, host=host, port=port, scheme=scheme,
+    ))
+
+
+@mcp.tool
+def baidu_sync_list(
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """列出网盘同步任务。"""
+    return _fmt(run_trim(["baidu-netdisk", "sync", "list"], profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def baidu_sync_create(
+    direction: Literal["download", "upload"],
+    nas_path: Annotated[str, "NAS 侧目录"],
+    netdisk_path: Annotated[str, "网盘侧目录"],
+    interval: Literal["1m", "10m", "30m"] = "10m",
+    conflict: Literal["fail", "rename", "overwrite"] = "rename",
+    immediate: bool = False,
+    keep_deleted: bool = False,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """创建网盘同步任务（写操作）。direction=download 网盘→NAS，
+    upload NAS→网盘。"""
+    args = [
+        "baidu-netdisk", "sync", "create",
+        "--direction", direction, "--nas-path", nas_path, "--netdisk-path", netdisk_path,
+        "--interval", interval, "--conflict", conflict,
+    ]
+    if immediate:
+        args.append("--immediate")
+    if keep_deleted:
+        args.append("--keep-deleted")
+    args += _bool_flag(True)
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def baidu_sync_update(
+    sync_id: Annotated[str, "同步任务 ID"],
+    status: Literal["running", "paused"],
+    interval: Literal["1m", "10m", "30m"],
+    conflict: Literal["fail", "rename", "overwrite"],
+    immediate: bool = False,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """修改网盘同步任务配置（写操作；status/interval/conflict 必填）。"""
+    args = [
+        "baidu-netdisk", "sync", "update", sync_id,
+        "--status", status, "--interval", interval, "--conflict", conflict,
+    ]
+    if immediate:
+        args.append("--immediate")
+    args += _bool_flag(True)
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme))
+
+
+@mcp.tool
+def baidu_sync_action(
+    sync_id: Annotated[str, "同步任务 ID"],
+    action: Literal["start", "pause", "delete"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """启停/删除网盘同步任务（写操作）。"""
+    return _fmt(run_trim(
+        ["baidu-netdisk", "sync", action, sync_id] + _bool_flag(True),
+        profile=profile, host=host, port=port, scheme=scheme,
+    ))
+
+
+@mcp.tool
+def diagnostic_export(
+    output_dir: Annotated[str, "服务器本地输出目录"],
+    srv_type: Annotated[str | None, "服务类型过滤"] = None,
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """导出 NAS 诊断日志到本地目录（写操作，生成诊断包）。"""
+    args = ["diagnostic-log", "export", "--output-dir", output_dir]
+    if srv_type:
+        args += ["--srv-type", srv_type]
+    args.append("--yes")
+    return _fmt(run_trim(args, profile=profile, host=host, port=port, scheme=scheme, timeout=600))
+
+
+@mcp.tool
+def diagnostic_stop(
+    task_id: Annotated[str, "诊断任务 ID"],
+    profile: Profile = None,
+    host: Host = None,
+    port: Port = None,
+    scheme: Scheme = None,
+) -> str:
+    """停止诊断日志导出任务（写操作）。"""
+    return _fmt(run_trim(["diagnostic-log", "stop", "--task-id", task_id, "--yes"], profile=profile, host=host, port=port, scheme=scheme))
 
 
 # ---------------------------------------------------------------------------

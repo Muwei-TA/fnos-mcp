@@ -4,24 +4,24 @@
 
 ## 功能覆盖
 
-89 个 MCP 工具，覆盖 trim-cli 的完整能力面：
+214 个 MCP 工具，覆盖 trim-cli 除 media 外的完整能力面：
 
 | 模块 | 工具示例 |
 | --- | --- |
 | 认证 | `login`（OAuth 2.0 + PKCE）、`submit_auth_code`、`logout`、`whoami` |
-| 系统 | `system_info`、`system_hardware`、`system_volumes`、`system_power_plan` |
-| 文件 | `file_list`、`file_search`、`file_copy`、`file_delete`、`file_upload`、`file_write_text`、`file_trash_*` |
+| 系统 | `system_info`、`system_hardware`、`system_volumes`、`system_power_plan`、`system_details`（18 项聚合）、`system_timezone_list` |
+| 文件 | `file_list`、`file_search`、`file_copy`、`file_upload`、`file_write_text`、`file_compress`、`file_extract`、`file_chown`、`file_acl_get/set`、`file_share_*`、`file_team_*`、`file_fav_*`、`file_trash_*` |
 | 相册 | `photos_search`（AI 语义搜图）、`photos_detail`、`photos_preview_url` |
-| 应用中心 | `app_list`、`app_store_search`、`app_install`、`app_uninstall` |
-| Docker | `docker_containers`、`docker_images`、`docker_image_pull`、`docker_container_create`、`docker_compose_ls`、`docker_compose_create`、`docker_request` |
-| 下载 | `download_list`、`download_add_uri`、`download_action` |
-| 日志 | `logger_list`、`logger_modules`、`logger_export` |
-| 监控 | `monitor_cpu`、`monitor_memory`、`monitor_network`、`monitor_disk`、`monitor_gpu` |
+| 应用中心 | `app_list`、`app_store_search/list`、`app_install`、`app_install_fpk`、`app_update`、`app_task_status`、`app_task_action`、`app_config_*`、`app_openapi_*`、`app_guide_*` |
+| Docker | `docker_containers`、`docker_images`、`docker_image_pull/inspect`、`docker_container_create/inspect/top/stats/update`、`docker_compose_ls`、`docker_compose_create`、`docker_request` |
+| 下载 | `download_list`、`download_add_uri`、`download_add_path`、`download_action`、`download_stats`、`download_request` |
+| 日志 | `logger_list`、`logger_modules`、`logger_export`、`logger_clear`、`logger_archive_query/set`、`logger_debuglog`、`diagnostic_export` |
+| 监控 | `monitor_cpu`、`monitor_memory`、`monitor_network`、`monitor_disk`、`monitor_gpu`、`monitor_npu`、`monitor_battery`、`monitor_fan`、`monitor_proc_info/services`、`monitor_metrics` |
 | 网络 | `network_ssh_status`、`network_ssh_switch` |
 | 电源 | `power_reboot`、`power_poweroff` |
-| 存储 | `storage_overview`、`storage_disks`、`storage_disk_smart` |
-| 用户 | `user_list`、`user_info`、`user_groups` |
-| 百度网盘 | `baidu_list`、`baidu_search`、`baidu_quota` |
+| 存储 | `storage_overview`、`storage_disks`、`storage_free_disks`、`storage_removable`、`storage_disk_info/health/smart`、`storage_mount/umount` |
+| 用户 | `user_list`、`user_info`、`user_add/mod/del`、`user_set_admin`、`user_unfreeze`、`user_frozen_list`、`user_groups`、`user_group_*`（增删改/成员管理） |
+| 百度网盘 | `baidu_list`、`baidu_search`、`baidu_info`、`baidu_upload/download`、`baidu_move/copy`、`baidu_share_save`、`baidu_task_*`、`baidu_sync_*` |
 | 原始 API | `raw_request`、`photos_raw_request`（兜底） |
 
 ## 安装
@@ -75,8 +75,9 @@ vendor/trim-cli/trim-cli-linux-x64 --profile default --host <host> --port 443 --
 ## 安全设计
 
 - 写操作命令一律显式传 `--yes`，避免 CLI 交互确认卡死 MCP 进程
-- 危险操作（`power_reboot`、`file_trash_clear`、`docker_container_rm` 等）在工具描述中明确标注，由客户端侧决定是否二次确认
+- 危险操作（`power_reboot`、`file_trash_clear`、`file_team_trash_clear`、`logger_clear`、`user_del`、`docker_container_rm` 等）在工具描述中明确标注，由客户端侧决定是否二次确认
 - 不封装 `media` 命令（fnos-skill 明确排除 Media API）
+- 不封装 storage 池级破坏性操作（`create/stop/add-disk/remove-disk/replace-disk/extend/resize/format/eject`），需要时由管理员在 NAS 端操作；`user_change-password`（改密会作废 session）也未暴露
 - `login` 使用 15 秒超时提取授权 URL 后返回，不阻塞 MCP 进程
 
 ## 项目结构
@@ -85,7 +86,7 @@ vendor/trim-cli/trim-cli-linux-x64 --profile default --host <host> --port 443 --
 fnos-mcp/
 ├── fnos_mcp/
 │   ├── cli.py       # trim-cli 二进制引导与执行层
-│   └── server.py    # FastMCP 服务器与 89 个工具定义
+│   └── server.py    # FastMCP 服务器与 214 个工具定义
 ├── vendor/trim-cli/ # 六平台 trim-cli 二进制（来自 fnos-skill fa21571）
 ├── pyproject.toml
 └── README.md
